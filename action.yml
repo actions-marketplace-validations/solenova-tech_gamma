@@ -7,9 +7,6 @@ inputs:
     description: 'Branch in which you want to merge the PR, defaults to alpha'
     required: false
     default: 'alpha'
-  token:
-    description: GitHub Personal Access Token
-    required: true
 branding:
   icon: 'activity'
   color: 'white'
@@ -17,24 +14,61 @@ branding:
 runs:
   using: 'composite'
   steps:
-    - run: |
-        echo ${{ env.TARGET_BRANCH }}
-        echo ${{ env.GITHUB_PAT }}
-        git config --global user.email "${{ github.actor }}@users.noreply.github.com"
-        git config --global user.name "${{ github.actor }}"
-        git remote set-url origin https://${{ env.GITHUB_PAT }}@github.com/${{ github.repository }}.git
-        git fetch
-        if ! git rev-parse --verify ${{ env.TARGET_BRANCH }} >/dev/null 2>&1; then
-          git checkout ${{ github.event.repository.default_branch }}
-          git pull
-          git branch ${{ env.TARGET_BRANCH }}
-          git push --set-upstream origin ${{ env.TARGET_BRANCH }}
+    - id: is-pr
+      run: |
+        echo "THIS ACTION SUPPORTS PULL REQUESTS ONLY, for now..."
+      shell: bash
+      if: ${{ github.event_name != 'pull_request' }}
+
+    - id: merge-branch
+      run: |
+        if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+          echo "GIT REPO NOT FOUND, PLEASE USE \`actions/checkout@latest\`"
+          exit 1
         fi
-        git checkout ${{ env.TARGET_BRANCH }}
-        git pull
+        echo "DECLARING DEFAULT BRANCH"
+        BRANCH=${{ github.event.repository.default_branch }}
+        git fetch
+        if ! git ls-remote --exit-code --heads origin ${{ env.TARGET_BRANCH }} >/dev/null 2>&1; then
+          echo "CHECKING OUT \`$BRANCH\`"
+          git checkout $BRANCH
+          echo "FETCHING LATEST CODE AT \`$BRANCH\`"
+          git pull origin $BRANCH
+          echo "CREATING \`${{ env.TARGET_BRANCH }}\`"
+          git branch ${{ env.TARGET_BRANCH }}
+          echo "PUSHING \`${{ env.TARGET_BRANCH }}\`"
+          git push --set-upstream origin ${{ env.TARGET_BRANCH }}
+          echo "CHECKING OUT \`${{ env.TARGET_BRANCH }}\`"
+          git checkout ${{ env.TARGET_BRANCH }}
+        else
+          echo "CHECKING OUT \`${{ env.TARGET_BRANCH }}\`"
+          git checkout -b ${{ env.TARGET_BRANCH }} origin/${{ env.TARGET_BRANCH }}
+        fi
+        echo "PULLING CHANGES IF ANY"
+        git pull origin ${{ env.TARGET_BRANCH }}
+        echo "SETTING GITHUB-ACTION BOT CONFIG"
+        git config user.name 'github-actions[bot]'
+        git config user.email 'github-actions[bot]@users.noreply.github.com'
+        echo "MERGING PR IN \`${{ env.TARGET_BRANCH }}\`"
         git merge --no-ff origin/${{ github.event.pull_request.head.ref }} -m "Merge pull request into ${{ env.TARGET_BRANCH }}"
+        echo "PUSHING CHANGES TO ${{ env.TARGET_BRANCH }}"
         git push origin ${{ env.TARGET_BRANCH }}
       shell: bash
+      if: ${{ github.event_name == 'pull_request' && ( github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'synchronize' ) }}
       env:
-        TARGET_BRANCH: INPUTS_TARGET-BRANCH
-        GITHUB_PAT: INPUTS_TOKEN
+        TARGET_BRANCH: ${{ inputs.target-branch }}
+
+    - id: leave-comment
+      run: |
+        echo "EXTRACTING PR NUMBER"
+        PR_NUMBER=$(echo "${{ github.event.pull_request.url }}" | awk -F'/' '{print $NF}')
+        echo "CREATING COMMENT BODY AND API URL"
+        COMMENT="PR #$PR_NUMBER has been merged successfully in [${{ env.TARGET_BRANCH }}](https://github.com/${{ github.repository }}/tree/${{ env.TARGET_BRANCH }}) by [Gamma](https://gamma.solenova.tech). Thanks to @${{ github.actor }} who contributed the last commit.\n\nLet's celebrate this milestone and get ready for the next one!"
+        API_URL="https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments"
+
+        echo "POSTING COMMENT ON PR"
+        curl -X POST -H "Authorization: Bearer ${{ github.token }}" -d "{\"body\":\"$COMMENT\"}" $API_URL
+      shell: bash
+      if: ${{ steps.merge-branch.outcome == 'success' }}
+      env:
+        TARGET_BRANCH: ${{ inputs.target-branch }}
